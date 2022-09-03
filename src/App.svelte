@@ -8,18 +8,23 @@
   import * as p5 from "p5";
 
   let synth = null;
+  let volume = null;
   let videoSource = null;
   let loading = false;
   let result = null;
+  let midiNote = 60;
 
   onMount(async () => {
     console.log("Mounted");
   });
 
   async function startHandtracking() {
-    // Start MIDI input and audio synth.
+    // Start MIDI input.
     navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
-    synth = new Tone.PluckSynth().toDestination();
+
+    // Connect audio effects.
+    volume = new Tone.Volume(0.0).toDestination();
+    synth = new Tone.Synth().connect(volume);
     Tone.start();
 
     // Start webcam.
@@ -39,8 +44,8 @@
     const options = {
       flipHorizontal: false, // boolean value for if the video should be flipped, defaults to false
       maxContinuousChecks: Infinity, // How many frames to go without running the bounding box detector. Defaults to infinity, but try a lower value if the detector is consistently producing bad predictions.
-      detectionConfidence: 0.8, // Threshold for discarding a prediction. Defaults to 0.8.
-      scoreThreshold: 0.75, // A threshold for removing multiple (likely duplicate) detections based on a "non-maximum suppression" algorithm. Defaults to 0.75
+      detectionConfidence: 0.9, // Threshold for discarding a prediction. Defaults to 0.8.
+      scoreThreshold: 0.9, // A threshold for removing multiple (likely duplicate) detections based on a "non-maximum suppression" algorithm. Defaults to 0.75
       iouThreshold: 0.3, // A float representing the threshold for deciding whether boxes overlap too much in non-maximum suppression. Must be between [0, 1]. Defaults to 0.3.
     };
     const handpose = ml5.handpose(videoSource, options, modelLoaded);
@@ -52,16 +57,27 @@
 
     // Listen to new 'hand' events.
     handpose.on("hand", (results) => {
+      if (results.length == 0) return;
+
       result = JSON.stringify(results, null, 2);
 
-      if (results.length > 0) {
-        // TODO Control in a fun way.
-        const note = Tone.Frequency(60, "midi").toNote();
-        const now = Tone.immediate();
-        const velocity = 100;
-        const duration = "16n";
-        synth.triggerAttackRelease(note, duration, now, velocity);
-      }
+      const boundingBox = results[0].boundingBox;
+      const [x1, y1] = boundingBox.topLeft;
+      const [x2, y2] = boundingBox.bottomRight;
+
+      // Size of bounding box.
+      // TODO Get video size.
+      const height = 720;
+      const width = 1280;
+      const maxDistance = Math.sqrt(Math.pow(height, 2) + Math.pow(width, 2));
+      const distance = Math.sqrt(Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2));
+      const normalizedDistance = distance / maxDistance;
+      result = normalizedDistance;
+
+      // TODO Control in a fun way.
+      const velocity = Math.log1p(normalizedDistance);
+
+      volume.volume.value = (1 - velocity) * -20.0;
     });
   }
 
@@ -96,9 +112,9 @@
   }
 
   function onMIDIMessage(message) {
-    var command = message.data[0];
-    var midiNote = message.data[1];
-    var velocity = message.data.length > 2 ? message.data[2] : 0;
+    const command = message.data[0];
+    midiNote = message.data[1];
+    const velocity = message.data.length > 2 ? message.data[2] : 0;
 
     switch (command) {
       case 144:
@@ -107,7 +123,7 @@
         const duration = "16n";
         const now = Tone.immediate();
         if (velocity > 0) {
-          synth.triggerAttackRelease(note, duration, now, velocity);
+          synth.triggerAttack(note, now, 1.0);
         }
         break;
       case 128:
