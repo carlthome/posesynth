@@ -1,24 +1,30 @@
 <script>
   "use strict";
   import { onMount } from "svelte";
-
   import * as ml5 from "ml5";
   import * as tf from "@tensorflow/tfjs";
   import * as Tone from "tone";
   import * as p5 from "p5";
 
+  import Counter from "./lib/Counter.svelte";
+
   let synth = null;
   let volume = null;
-  let videoSource = null;
+  let pitchDetector = null;
+  let video = null;
   let loading = false;
-  let result = null;
+  let boundingBoxSize = 0.0;
+  let pitch = 0.0;
   let midiNote = 60;
+  let midi = null;
 
   onMount(async () => {
     console.log("Mounted");
   });
 
   async function startHandtracking() {
+    loading = true;
+
     // Start MIDI input.
     navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
 
@@ -27,15 +33,26 @@
     synth = new Tone.Synth().connect(volume);
     Tone.start();
 
+    // Start microphone.
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+
+      // Start pitch detector.
+      const audioContext = new AudioContext();
+      pitchDetector = ml5.pitchDetection("/model", audioContext, stream);
+    } catch (error) {
+      console.log(error);
+    }
+
     // Start webcam.
     try {
-      loading = true;
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 1280, height: 720 },
       });
-      videoSource.srcObject = stream;
-      videoSource.play();
-      loading = false;
+      video.srcObject = stream;
+      video.play();
     } catch (error) {
       console.log(error);
     }
@@ -48,40 +65,41 @@
       scoreThreshold: 0.9, // A threshold for removing multiple (likely duplicate) detections based on a "non-maximum suppression" algorithm. Defaults to 0.75
       iouThreshold: 0.3, // A float representing the threshold for deciding whether boxes overlap too much in non-maximum suppression. Must be between [0, 1]. Defaults to 0.3.
     };
-    const handpose = ml5.handpose(videoSource, options, modelLoaded);
+    const handpose = ml5.handpose(video, options, modelLoaded);
+    handpose.on("hand", onHand);
 
-    // When the model is loaded
     function modelLoaded() {
-      console.log("Model Loaded!");
+      loading = false;
     }
-
-    // Listen to new 'hand' events.
-    handpose.on("hand", (results) => {
-      if (results.length == 0) return;
-
-      result = JSON.stringify(results, null, 2);
-
-      const boundingBox = results[0].boundingBox;
-      const [x1, y1] = boundingBox.topLeft;
-      const [x2, y2] = boundingBox.bottomRight;
-
-      // Size of bounding box.
-      // TODO Get video size.
-      const height = 720;
-      const width = 1280;
-      const maxDistance = Math.sqrt(Math.pow(height, 2) + Math.pow(width, 2));
-      const distance = Math.sqrt(Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2));
-      const normalizedDistance = distance / maxDistance;
-      result = normalizedDistance;
-
-      // TODO Control in a fun way.
-      const velocity = Math.log1p(normalizedDistance);
-
-      volume.volume.value = (1 - velocity) * -20.0;
-    });
   }
 
-  let midi = null;
+  async function onHand(results) {
+    if (results.length == 0) return;
+
+    const boundingBox = results[0].boundingBox;
+    const [x1, y1] = boundingBox.topLeft;
+    const [x2, y2] = boundingBox.bottomRight;
+
+    // Size of bounding box.
+    const height = video.videoHeight;
+    const width = video.videoWidth;
+    const maxDistance = Math.sqrt(Math.pow(height, 2) + Math.pow(width, 2));
+    const distance = Math.sqrt(Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2));
+    const normalizedDistance = distance / maxDistance;
+    boundingBoxSize = normalizedDistance;
+
+    // TODO Control in a fun way.
+    const velocity = Math.log1p(normalizedDistance);
+
+    volume.volume.value = (1 - velocity) * -20.0;
+
+    // Read pitch and play note.
+    pitch = await pitchDetector.getPitch();
+    const note = Tone.Frequency(pitch).toNote();
+    const now = Tone.immediate();
+    synth.triggerAttack(note, now, 1.0);
+  }
+
   function onMIDISuccess(midiAccess) {
     midi = midiAccess;
     startLoggingMIDIInput(midi);
@@ -120,7 +138,6 @@
       case 144:
         console.log("Note on");
         const note = Tone.Frequency(midiNote, "midi").toNote();
-        const duration = "16n";
         const now = Tone.immediate();
         if (velocity > 0) {
           synth.triggerAttack(note, now, 1.0);
@@ -141,15 +158,21 @@
 </script>
 
 <main>
+  <Counter />
   {#if loading}
-    <h1>LOADING</h1>
+    <h1>Starting...</h1>
   {:else}
-    <h1>Hello {name}!</h1>
+    <h1>PoseSynth</h1>
   {/if}
-  <video id="video" bind:this={videoSource} />
+  <video id="video" bind:this={video}>
+    <track kind="captions" />
+  </video>
   <button on:click={startHandtracking}>Start</button>
 
-  <pre>{result}</pre>
+  <pre>
+    Pitch: {pitch} Hz
+    Hand size: {boundingBoxSize} %
+  </pre>
 </main>
 
 <style>
